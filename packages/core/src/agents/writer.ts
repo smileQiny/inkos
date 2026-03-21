@@ -4,6 +4,7 @@ import type { GenreProfile } from "../models/genre-profile.js";
 import type { BookRules } from "../models/book-rules.js";
 import { buildWriterSystemPrompt, type FanficContext } from "./writer-prompts.js";
 import { buildSettlerSystemPrompt, buildSettlerUserPrompt } from "./settler-prompts.js";
+import { buildObserverSystemPrompt, buildObserverUserPrompt } from "./observer-prompts.js";
 import { parseSettlementOutput } from "./settler-parser.js";
 import { readGenreProfile, readBookRules } from "./rules-reader.js";
 import { validatePostWrite, type PostWriteViolation } from "./post-write-validator.js";
@@ -243,9 +244,25 @@ export class WriterAgent extends BaseAgent {
     readonly characterMatrix: string;
     readonly volumeOutline: string;
   }): Promise<{ settlement: ReturnType<typeof parseSettlementOutput>; usage: TokenUsage }> {
+    // Phase 2a: Observer — extract all facts from the chapter
+    const resolvedLang = params.book.language ?? params.genreProfile.language;
+    const observerSystem = buildObserverSystemPrompt(params.book, params.genreProfile, resolvedLang);
+    const observerUser = buildObserverUserPrompt(params.chapterNumber, params.title, params.content, resolvedLang);
+
+    this.ctx.logger?.info(`Phase 2a: observing facts for chapter ${params.chapterNumber}`);
+    const observerResponse = await this.chat(
+      [
+        { role: "system", content: observerSystem },
+        { role: "user", content: observerUser },
+      ],
+      { maxTokens: 4096, temperature: 0.5 },
+    );
+    const observations = observerResponse.content;
+
+    // Phase 2b: Reflector — merge observations into truth files
+    this.ctx.logger?.info(`Phase 2b: reflecting observations into truth files`);
     const settlerSystem = buildSettlerSystemPrompt(
-      params.book, params.genreProfile, params.bookRules,
-      params.book.language ?? params.genreProfile.language,
+      params.book, params.genreProfile, params.bookRules, resolvedLang,
     );
 
     const settlerUser = buildSettlerUserPrompt({
@@ -260,6 +277,7 @@ export class WriterAgent extends BaseAgent {
       emotionalArcs: params.emotionalArcs,
       characterMatrix: params.characterMatrix,
       volumeOutline: params.volumeOutline,
+      observations,
     });
 
     // Settler outputs all truth files — scale with content size
